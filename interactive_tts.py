@@ -230,6 +230,21 @@ def ensure_voice_available(voice_name: str) -> bool:
     return False
 
 
+def open_empty_window() -> None:
+    def run_window() -> None:
+        try:
+            import tkinter as tk
+
+            window = tk.Tk()
+            window.title("tts-speaker")
+            window.geometry("320x200")
+            window.mainloop()
+        except Exception as exc:  # noqa: BLE001
+            print(f"打开空窗口失败：{exc}")
+
+    threading.Thread(target=run_window, daemon=True).start()
+
+
 def sanitize_filename_text(text: str) -> str:
     compact_text = re.sub(r"\s+", "", text)
     safe_text = WINDOWS_FORBIDDEN_FILENAME_CHARS.sub("_", compact_text)
@@ -381,6 +396,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir)
+
+    open_empty_window()
 
     print("交互式中文语音生成")
     print(f"语音文件会保存到 {output_dir}/日期/时间_文本开头.wav。")
