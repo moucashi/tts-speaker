@@ -16,6 +16,7 @@ from pathlib import Path
 
 ESC = "\x1b"
 CTRL_C = "\x03"
+DEFAULT_MODEL = "zh_CN-xiao_ya-medium"
 DEFAULT_OUTPUT_DIR = "voices"
 MAX_FILENAME_TEXT_LENGTH = 24
 WINDOWS_FORBIDDEN_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -170,6 +171,65 @@ def make_piper_command(model: str, output: Path, text: str) -> list[str]:
     ]
 
 
+def get_voice_files(voice_name: str) -> tuple[Path, Path]:
+    model_path = Path(voice_name)
+    if model_path.suffix == ".onnx":
+        return model_path, Path(f"{model_path}.json")
+
+    return Path(f"{voice_name}.onnx"), Path(f"{voice_name}.onnx.json")
+
+
+def is_downloadable_voice_name(voice_name: str) -> bool:
+    model_path = Path(voice_name)
+    return not model_path.is_absolute() and model_path.parent == Path(".") and model_path.suffix == ""
+
+
+def has_voice_files(voice_name: str) -> bool:
+    model_file, config_file = get_voice_files(voice_name)
+    return model_file.exists() and config_file.exists()
+
+
+def download_voice(voice_name: str) -> bool:
+    command = ["uv", "run", "python", "-m", "piper.download_voices", voice_name]
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+
+    print(f"当前目录未找到语音：{voice_name}")
+    print("开始下载语音，命令输出如下：")
+    print(" ".join(command))
+    result = subprocess.run(command, env=env, check=False)
+
+    if result.returncode != 0:
+        print(f"语音下载失败，退出码：{result.returncode}")
+        return False
+
+    return True
+
+
+def ensure_voice_available(voice_name: str) -> bool:
+    if has_voice_files(voice_name):
+        return True
+
+    model_file, config_file = get_voice_files(voice_name)
+    if not is_downloadable_voice_name(voice_name):
+        print("未找到语音模型文件：")
+        print(f"- {model_file}")
+        print(f"- {config_file}")
+        print("当前模型参数不是语音名，无法自动下载。请放置模型文件后重试。")
+        return False
+
+    if not download_voice(voice_name):
+        return False
+
+    if has_voice_files(voice_name):
+        return True
+
+    print("语音下载命令已结束，但当前目录仍未找到完整语音文件：")
+    print(f"- {model_file}")
+    print(f"- {config_file}")
+    return False
+
+
 def sanitize_filename_text(text: str) -> str:
     compact_text = re.sub(r"\s+", "", text)
     safe_text = WINDOWS_FORBIDDEN_FILENAME_CHARS.sub("_", compact_text)
@@ -306,8 +366,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-m",
         "--model",
-        default="zh_CN-xiao_ya-medium",
-        help="Piper 模型名称或模型文件路径，默认：zh_CN-xiao_ya-medium。",
+        default=DEFAULT_MODEL,
+        help=f"Piper 模型名称或模型文件路径，默认：{DEFAULT_MODEL}。",
     )
     parser.add_argument(
         "-o",
@@ -326,6 +386,9 @@ def main() -> int:
     print(f"语音文件会保存到 {output_dir}/日期/时间_文本开头.wav。")
     print("输入文本后回车生成语音。输入中按 Esc 或 Ctrl+C 清空；空输入时按 Ctrl+C 退出。")
     print("生成中按 Esc 或 Ctrl+C 取消。")
+
+    if not ensure_voice_available(args.model):
+        return 1
 
     with TerminalKeys() as keys:
         while True:

@@ -14,11 +14,17 @@
 
 - Python 3.14
 - uv
-- Piper 中文模型文件：
+- 默认 Piper 中文语音：
   - `zh_CN-xiao_ya-medium.onnx`
   - `zh_CN-xiao_ya-medium.onnx.json`
 
-模型文件需要放在项目根目录，或通过启动参数指定其它模型路径。
+默认语音文件需要位于项目根目录。如果当前目录缺少默认语音文件，程序会自动执行以下命令下载：
+
+```powershell
+uv run python -m piper.download_voices zh_CN-xiao_ya-medium
+```
+
+下载命令的输出会直接显示在终端中。
 
 ## 安装依赖
 
@@ -49,6 +55,8 @@ uv run python -X utf8 interactive_tts.py
 ```powershell
 uv run python -X utf8 interactive_tts.py --model zh_CN-xiao_ya-medium
 ```
+
+自动下载仅支持语音名形式的模型参数。如果通过 `--model` 传入具体 `.onnx` 文件路径，请先手动准备对应的 `.onnx` 和 `.onnx.json` 文件。
 
 指定输出目录：
 
