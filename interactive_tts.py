@@ -4,14 +4,15 @@ import argparse
 from datetime import datetime
 import os
 import platform
-import queue
 import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
+from typing import Any
 
 
 ESC = "\x1b"
@@ -20,6 +21,7 @@ DEFAULT_MODEL = "zh_CN-xiao_ya-medium"
 DEFAULT_OUTPUT_DIR = "voices"
 MAX_FILENAME_TEXT_LENGTH = 24
 WINDOWS_FORBIDDEN_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_VOICE_CACHE: dict[Path, Any] = {}
 
 
 class ExitRequested(Exception):
@@ -155,22 +157,6 @@ def read_play_answer(prompt: str, keys: TerminalKeys) -> bool:
             return False
 
 
-def make_piper_command(model: str, output: Path, text: str) -> list[str]:
-    return [
-        sys.executable,
-        "-X",
-        "utf8",
-        "-m",
-        "piper",
-        "-m",
-        model,
-        "-f",
-        str(output),
-        "--",
-        text,
-    ]
-
-
 def get_voice_files(voice_name: str) -> tuple[Path, Path]:
     model_path = Path(voice_name)
     if model_path.suffix == ".onnx":
@@ -189,20 +175,24 @@ def has_voice_files(voice_name: str) -> bool:
     return model_file.exists() and config_file.exists()
 
 
+def resolve_model_path(model: str) -> Path:
+    model_file, _ = get_voice_files(model)
+    return model_file
+
+
 def download_voice(voice_name: str) -> bool:
-    command = ["uv", "run", "python", "-m", "piper.download_voices", voice_name]
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
+    from piper.download_voices import download_voice as piper_download_voice
 
     print(f"当前目录未找到语音：{voice_name}")
-    print("开始下载语音，命令输出如下：")
-    print(" ".join(command))
-    result = subprocess.run(command, env=env, check=False)
+    print("开始下载语音...")
 
-    if result.returncode != 0:
-        print(f"语音下载失败，退出码：{result.returncode}")
+    try:
+        piper_download_voice(voice_name, Path.cwd())
+    except Exception as exc:  # noqa: BLE001
+        print(f"语音下载失败：{exc}")
         return False
 
+    print(f"语音下载完成：{voice_name}")
     return True
 
 
@@ -271,24 +261,64 @@ def build_output_path(output_dir: Path, text: str, now: datetime | None = None) 
     return candidate
 
 
-def drain_output(stream, output_queue: queue.Queue[str]) -> None:  # type: ignore[no-untyped-def]
+def load_voice(model: str):
+    from piper import PiperVoice
+
+    model_path = resolve_model_path(model).resolve()
+    voice = _VOICE_CACHE.get(model_path)
+    if voice is None:
+        print("正在加载语音模型...")
+        voice = PiperVoice.load(model_path, download_dir=Path.cwd())
+        _VOICE_CACHE[model_path] = voice
+
+    return voice
+
+
+def synthesize_voice_to_wav(
+    model: str,
+    output: Path,
+    text: str,
+    cancel_requested: threading.Event,
+) -> None:
+    voice = load_voice(model)
+    wav_file: wave.Wave_write | None = None
+
     try:
-        for line in stream:
-            output_queue.put(line.rstrip())
+        for audio_chunk in voice.synthesize(text):
+            if cancel_requested.is_set():
+                return
+
+            if wav_file is None:
+                wav_file = wave.open(str(output), "wb")
+                wav_file.setframerate(audio_chunk.sample_rate)
+                wav_file.setsampwidth(audio_chunk.sample_width)
+                wav_file.setnchannels(audio_chunk.sample_channels)
+
+            wav_file.writeframes(audio_chunk.audio_int16_bytes)
     finally:
-        stream.close()
+        if wav_file is not None:
+            wav_file.close()
 
 
-def terminate_process(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
+def start_cancel_monitor(keys: TerminalKeys, cancel_requested: threading.Event) -> threading.Event:
+    done = threading.Event()
 
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+    def monitor() -> None:
+        while not done.is_set() and not cancel_requested.is_set():
+            try:
+                ch = keys.read_key_if_available()
+            except KeyboardInterrupt:
+                cancel_requested.set()
+                break
+
+            if ch in (ESC, CTRL_C):
+                cancel_requested.set()
+                break
+
+            time.sleep(0.05)
+
+    threading.Thread(target=monitor, daemon=True).start()
+    return done
 
 
 def generate_voice(model: str, output: Path, text: str, keys: TerminalKeys) -> tuple[bool, list[str]]:
@@ -296,64 +326,33 @@ def generate_voice(model: str, output: Path, text: str, keys: TerminalKeys) -> t
     temp_output = output.with_name(
         f".{output.stem}.{os.getpid()}.{int(time.time() * 1000)}.tmp{output.suffix or '.wav'}"
     )
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    command = make_piper_command(model, temp_output, text)
-    creationflags = 0
-    start_new_session = False
-
-    if platform.system() == "Windows":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        start_new_session = True
-
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-        creationflags=creationflags,
-        start_new_session=start_new_session,
-    )
-    output_queue: queue.Queue[str] = queue.Queue()
-    assert process.stdout is not None
-    reader = threading.Thread(target=drain_output, args=(process.stdout, output_queue), daemon=True)
-    reader.start()
+    cancel_requested = threading.Event()
+    monitor_done = start_cancel_monitor(keys, cancel_requested)
 
     try:
-        while process.poll() is None:
-            ch = keys.read_key_if_available()
-            if ch in (ESC, CTRL_C):
-                terminate_process(process)
-                if temp_output.exists():
-                    temp_output.unlink()
-                return False, ["已取消生成。"]
-
-            time.sleep(0.05)
+        synthesize_voice_to_wav(model, temp_output, text, cancel_requested)
     except KeyboardInterrupt:
-        terminate_process(process)
+        cancel_requested.set()
+        if temp_output.exists():
+            temp_output.unlink()
+        return False, ["已取消生成。"]
+    except Exception as exc:  # noqa: BLE001
+        if temp_output.exists():
+            temp_output.unlink()
+        return False, [f"生成失败：{exc}"]
+    finally:
+        monitor_done.set()
+
+    if cancel_requested.is_set():
         if temp_output.exists():
             temp_output.unlink()
         return False, ["已取消生成。"]
 
-    reader.join(timeout=1)
-    logs: list[str] = []
-    while not output_queue.empty():
-        logs.append(output_queue.get())
-
-    if process.returncode != 0:
-        if temp_output.exists():
-            temp_output.unlink()
-        return False, logs
-
     if not temp_output.exists():
-        return False, logs + ["生成失败：未找到临时输出文件。"]
+        return False, ["生成失败：未找到临时输出文件。"]
 
     temp_output.replace(output)
-    return True, logs
+    return True, []
 
 
 def play_wav(path: Path) -> None:

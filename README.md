@@ -18,13 +18,7 @@
   - `zh_CN-xiao_ya-medium.onnx`
   - `zh_CN-xiao_ya-medium.onnx.json`
 
-默认语音文件需要位于项目根目录。如果当前目录缺少默认语音文件，程序会自动执行以下命令下载：
-
-```powershell
-uv run python -m piper.download_voices zh_CN-xiao_ya-medium
-```
-
-下载命令的输出会直接显示在终端中。
+默认语音文件需要位于项目根目录。如果当前目录缺少默认语音文件，程序会通过 Piper 的 Python 下载接口自动下载，并在终端显示下载状态。
 
 ## 安装依赖
 
@@ -49,6 +43,8 @@ uv lock
 ```powershell
 uv run python -X utf8 interactive_tts.py
 ```
+
+交互式程序会通过 Python API 直接加载 Piper 模型并生成音频，不会在每次生成时启动 `python -m piper` 子进程。
 
 指定模型：
 
