@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+.idea/
+
+g2pW/
+voices/
+test.wav
+*.wav
+
+*.onnx
+*.onnx.json
